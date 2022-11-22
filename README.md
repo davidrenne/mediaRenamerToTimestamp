@@ -13,7 +13,7 @@ Once you start having files renamed to their date taken, you will never like see
 To start, clone the repo:
 
 ```bash
-go install github.com/davidrenne/mediaRenamerToTimestamp@latest
+go install github.com/davidrenne/mediaRenamerToTimestamp@02902b80b3750b2c2f7ed65ecde8f6d08c74ed20
 
 mediaRenamerToTimestamp "Y:\YourFiles\"
 ```
