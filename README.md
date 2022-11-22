@@ -1,6 +1,6 @@
 # mediaRenamerToTimestamp
 
-Tool to re-name recursively media files (all image types and MP4 and MOV files).  e.g. `1997-05-01 12.15.33.jpg`
+Tool to re-name recursively media files (all image types and MP4 and MOV files).  e.g. `1997-05-01 12.15.33.jpg` so that they sort properly on a normal filesystem (mac/windows/linux)
 
 ## Reasoning
 
