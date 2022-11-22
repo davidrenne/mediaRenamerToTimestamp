@@ -15,13 +15,13 @@ To start, clone the repo:
 ```bash
 go install github.com/davidrenne/mediaRenamerToTimestamp@02902b80b3750b2c2f7ed65ecde8f6d08c74ed20
 
-mediaRenamerToTimestamp "Y:\YourFiles\"
+mediaRenamerToTimestamp "/Users/yourusername/Photos/YourFiles/"
 ```
 
-Or pass a custom timestamp format
+Or pass a custom timestamp format using any format [using these date times](https://www.geeksforgeeks.org/time-formatting-in-golang/) such as RFC850 example below:
 
 ```bash
-mediaRenamerToTimestamp "Y:\YourFiles\" "Any format using these date times https://www.geeksforgeeks.org/time-formatting-in-golang/ such as RFC850 Monday, 02-Jan-06 15:04:05 MST"
+mediaRenamerToTimestamp "/Users/yourusername/Photos/YourFiles/" "Monday, 02-Jan-06 15:04:05 MST"
 ```
 
 ## Warning
