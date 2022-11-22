@@ -2,6 +2,12 @@
 
 Tool to re-name recursively media files (all image types and MP4 and MOV files).  e.g. `1997-05-01 12.15.33.jpg`
 
+## Reasoning
+
+I am a huge dropbox fan of how they sync multiple phone files and digital camera cards and rename to this format.  I use the free 2GB account to sync my wife's phone and mine and 1 desktop as a staging area to sync to google photos and my folder based storage.  But I wanted my own way to rename files so I wrote this out of necessity to clean up some of my media collection of family photos.
+
+Once you start having files renamed to their date taken, you will never like seeing a mix of IMG_1234.JPG and stuff out of order of the order in which things happened IRL.
+
 ## Usage
 
 To start, clone the repo:
