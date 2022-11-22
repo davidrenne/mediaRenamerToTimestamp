@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -72,6 +75,63 @@ var (
 	attemptRenameToDifferentMinute bool // set to false if you dont want this desire
 )
 
+// mov spec: https://developer.apple.com/standards/qtff-2001.pdf
+// Page 31-33 contain information used in this file
+const appleEpochAdjustment = 2082844800
+
+const (
+	colisionMax             = 15000
+	movieResourceAtomType   = "moov"
+	movieHeaderAtomType     = "mvhd"
+	referenceMovieAtomType  = "rmra"
+	compressedMovieAtomType = "cmov"
+)
+
+func getVideoCreationTimeMetadata(videoBuffer io.ReadSeeker) (time.Time, error) {
+	buf := make([]byte, 8)
+
+	// Traverse videoBuffer to find movieResourceAtom
+	for {
+		// bytes 1-4 is atom size, 5-8 is type
+		// Read atom
+		if _, err := videoBuffer.Read(buf); err != nil {
+			return time.Time{}, err
+		}
+
+		if bytes.Equal(buf[4:8], []byte(movieResourceAtomType)) {
+			break // found it!
+		}
+
+		atomSize := binary.BigEndian.Uint32(buf) // check size of atom
+		videoBuffer.Seek(int64(atomSize)-8, 1)   // jump over data and set seeker at beginning of next atom
+	}
+
+	// read next atom
+	if _, err := videoBuffer.Read(buf); err != nil {
+		return time.Time{}, err
+	}
+
+	atomType := string(buf[4:8]) // skip size and read type
+	switch atomType {
+	case movieHeaderAtomType:
+		// read next atom
+		if _, err := videoBuffer.Read(buf); err != nil {
+			return time.Time{}, err
+		}
+
+		// byte 1 is version, byte 2-4 is flags, 5-8 Creation time
+		appleEpoch := int64(binary.BigEndian.Uint32(buf[4:])) // Read creation time
+
+		return time.Unix(appleEpoch-appleEpochAdjustment, 0).Local(), nil
+	case compressedMovieAtomType:
+		return time.Time{}, errors.New("Compressed video")
+	case referenceMovieAtomType:
+		return time.Time{}, errors.New("Reference video")
+	default:
+		return time.Time{}, errors.New("Did not find movie header atom (mvhd)")
+	}
+}
+
 func init() {
 	attemptRenameToDifferentMinute = true
 	numConcurrent := 100
@@ -127,12 +187,14 @@ func main() {
 	pictureExtensions := []string{
 		"JPG", "TIF", "BMP", "PNG", "JPEG", "GIF", "CR2", "ARW", "HEIC", "NEF",
 	}
+	movieExtensions := []string{
+		"MOV", "MP4",
+	}
 	files, _ := RecurseFiles(directoryToIterate)
 	for _, fileToWorkOn := range files {
 		pieces := strings.Split(fileToWorkOn, ".")
 		ext := strings.ToUpper(pieces[len(pieces)-1:][0])
-		if utils.InArray(ext, pictureExtensions) {
-
+		if utils.InArray(ext, pictureExtensions) || utils.InArray(ext, movieExtensions) {
 			pieces := strings.Split(filepath.Base(fileToWorkOn), ".")
 			existingExt := "." + pieces[len(pieces)-1:][0]
 			fileName := strings.ReplaceAll(filepath.Base(fileToWorkOn), existingExt, "")
@@ -147,7 +209,48 @@ func main() {
 				File: fileToWorkOn,
 				Func: func(fileWork string) {
 					pieces := strings.Split(filepath.Base(fileWork), ".")
+					extUpper := strings.ToUpper(pieces[len(pieces)-1:][0])
 					existingExt := "." + pieces[len(pieces)-1:][0]
+
+					// Movie files
+
+					if utils.InArray(extUpper, movieExtensions) {
+						fd, err := os.Open(fileWork)
+						timeInfo, err := getVideoCreationTimeMetadata(fd)
+						fd.Close()
+						if err != nil {
+							stdErr.Println("Could not Read timestamp on movie file " + fileWork + ": " + err.Error())
+							return
+						}
+
+						potentialName := timeInfo.Format(fmtDesired)
+						fileName := strings.ReplaceAll(filepath.Base(fileWork), existingExt, "")
+						if fileName != potentialName {
+							newName := strings.ReplaceAll(fileWork, path.PathSeparator+fileName+existingExt, path.PathSeparator+potentialName+existingExt)
+							err := os.Rename(fileWork, newName)
+							if err != nil {
+								if attemptRenameToDifferentMinute {
+									// In a case of old scanned photos, you could have exif of approx dates, so this is a colision handler if you had 15000 images in one directory with the same exif Date
+									for i := 1; i < colisionMax; i++ {
+										potentialName := potentialName + "-" + extensions.IntToString(i)
+										newName = strings.ReplaceAll(fileWork, path.PathSeparator+fileName+existingExt, path.PathSeparator+potentialName+existingExt)
+										if err := os.Rename(fileWork, newName); err == nil {
+											log.Println("Renamed " + fileName + " to " + potentialName)
+											return
+										}
+									}
+								}
+								stdErr.Println("Could not rename: " + fileWork + ": " + err.Error())
+								return
+							}
+							log.Println("Renamed " + fileName + " to " + potentialName)
+						}
+
+						return
+					}
+
+					// Picture files
+
 					data, err := os.ReadFile(fileWork)
 					if err != nil {
 						stdErr.Println("Could not ReadFile" + fileWork + ": " + err.Error())
@@ -181,7 +284,8 @@ func main() {
 							err := os.Rename(fileWork, newName)
 							if err != nil {
 								if attemptRenameToDifferentMinute {
-									for i := 1; i < 100000; i++ {
+									// In a case of old scanned photos, you could have exif of approx dates, so this is a colision handler if you had 15000 images in one directory with the same exif Date
+									for i := 1; i < colisionMax; i++ {
 										potentialName := potentialName + "-" + extensions.IntToString(i)
 										newName = strings.ReplaceAll(fileWork, path.PathSeparator+fileName+existingExt, path.PathSeparator+potentialName+existingExt)
 										if err := os.Rename(fileWork, newName); err == nil {
@@ -208,7 +312,8 @@ func main() {
 							err := os.Rename(fileWork, newName)
 							if err != nil {
 								if attemptRenameToDifferentMinute {
-									for i := 1; i < 100000; i++ {
+									// In a case of old scanned photos, you could have exif of approx dates, so this is a colision handler if you had 15000 images in one directory with the same exif Date
+									for i := 1; i < colisionMax; i++ {
 										potentialName := potentialName + "-" + extensions.IntToString(i)
 										newName = strings.ReplaceAll(fileWork, path.PathSeparator+fileName+existingExt, path.PathSeparator+potentialName+existingExt)
 										if err := os.Rename(fileWork, newName); err == nil {
