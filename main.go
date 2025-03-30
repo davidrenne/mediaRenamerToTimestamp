@@ -20,18 +20,22 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 )
 
+// ---------------------------------------------------
+// Global Configuration
+// ---------------------------------------------------
 var (
-	// Desired date format for renaming.
-	fmtDesired = "2006-01-02 15.04.05"
-	// If true, try appending "-1", "-2", etc. when a collision occurs.
+	fmtDesired = "2006-01-02 15.04.05" // default date format
+	// Try appending "-1", "-2", etc. when a collision occurs:
 	attemptRenameToDifferentMinute = true
-	// Maximum number of attempts to resolve collisions.
-	colisionMax       = 1000000
+	colisionMax                    = 1000000
+
 	pictureExtensions = []string{"JPG", "TIF", "BMP", "PNG", "JPEG", "GIF", "CR2", "ARW", "HEIC", "NEF"}
 	movieExtensions   = []string{"MOV", "MP4"}
-	backupSuffix      = " - Backup Exif"
+
+	backupSuffix = " - Backup Exif"
 )
 
+// Apple’s epoch offset for QuickTime metadata
 const appleEpochAdjustment = 2082844800
 
 const (
@@ -41,25 +45,55 @@ const (
 	compressedMovieAtomType = "cmov"
 )
 
+// ---------------------------------------------------
+// Backup Logic
+// ---------------------------------------------------
+
+// backupDirectory creates a sibling directory named "<originalName> - Backup Exif"
+// and copies all files/folders from the original path (recursively). We use `filepath.Rel`
+// to ensure we preserve subfolder structures no matter trailing slashes, OS path separators, etc.
 func backupDirectory(originalPath string) (string, error) {
-	backupPath := filepath.Join(filepath.Dir(originalPath), filepath.Base(originalPath)+backupSuffix)
-	err := filepath.Walk(originalPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	// Convert to absolute to avoid trailing slash weirdness.
+	originalAbsPath, err := filepath.Abs(originalPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Create sibling backup path based on the actual folder name.
+	parentDir := filepath.Dir(originalAbsPath)
+	baseName := filepath.Base(originalAbsPath)
+	backupPath := filepath.Join(parentDir, baseName+backupSuffix)
+
+	err = filepath.Walk(originalAbsPath, func(srcPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		backupFilePath := filepath.Join(backupPath, strings.TrimPrefix(path, originalPath))
+		// Derive the relative sub-path (srcPath minus the originalAbsPath prefix).
+		rel, errRel := filepath.Rel(originalAbsPath, srcPath)
+		if errRel != nil {
+			return errRel
+		}
+		destPath := filepath.Join(backupPath, rel)
+
 		if info.IsDir() {
-			return os.MkdirAll(backupFilePath, os.ModePerm)
+			return os.MkdirAll(destPath, os.ModePerm)
 		}
-		input, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		// Copy file contents into the backup.
+		input, errRead := os.ReadFile(srcPath)
+		if errRead != nil {
+			return errRead
 		}
-		return os.WriteFile(backupFilePath, input, info.Mode())
+		return os.WriteFile(destPath, input, info.Mode())
 	})
-	return backupPath, err
+
+	if err != nil {
+		return "", err
+	}
+	return backupPath, nil
 }
 
+// countFilteredFiles walks a directory, counting only files whose extensions
+// are in our photo/video lists. This is how we verify original vs. backup.
 func countFilteredFiles(directory string) (int, error) {
 	count := 0
 	err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
@@ -74,9 +108,12 @@ func countFilteredFiles(directory string) (int, error) {
 		}
 		return nil
 	})
-
 	return count, err
 }
+
+// ---------------------------------------------------
+// Helpers
+// ---------------------------------------------------
 
 func inArray(value string, array []string) bool {
 	for _, v := range array {
@@ -87,8 +124,10 @@ func inArray(value string, array []string) bool {
 	return false
 }
 
-func recurseFiles(fileDir string) (files []string, err error) {
-	err = filepath.Walk(fileDir, func(path string, f os.FileInfo, errWalk error) error {
+// recurseFiles returns all files (not directories) under fileDir, recursively.
+func recurseFiles(fileDir string) ([]string, error) {
+	files := []string{}
+	err := filepath.Walk(fileDir, func(path string, f os.FileInfo, errWalk error) error {
 		if errWalk != nil {
 			return errWalk
 		}
@@ -97,9 +136,14 @@ func recurseFiles(fileDir string) (files []string, err error) {
 		}
 		return nil
 	})
-	return
+	return files, err
 }
 
+// ---------------------------------------------------
+// Video Metadata (QuickTime) Extraction
+// ---------------------------------------------------
+
+// getVideoCreationTimeMetadata returns the embedded QuickTime/MP4 creation timestamp.
 func getVideoCreationTimeMetadata(videoBuffer io.ReadSeeker) (time.Time, error) {
 	buf := make([]byte, 8)
 	for {
@@ -135,6 +179,7 @@ func getVideoCreationTimeMetadata(videoBuffer io.ReadSeeker) (time.Time, error) 
 	}
 }
 
+// renameWithCollision tries renaming, and if the new name already exists, it appends `-1`, `-2`, etc.
 func renameWithCollision(src, targetBase, ext string) (string, error) {
 	dir := filepath.Dir(src)
 	candidate := filepath.Join(dir, targetBase+ext)
@@ -150,7 +195,11 @@ func renameWithCollision(src, targetBase, ext string) (string, error) {
 	return "", errors.New("no available filename after many attempts")
 }
 
-func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) {
+// ---------------------------------------------------
+// Core File Processing
+// ---------------------------------------------------
+
+func processFile(fileWork string, movieExts []string, stdErr *log.Logger) {
 	baseName := filepath.Base(fileWork)
 	pieces := strings.Split(baseName, ".")
 	if len(pieces) < 2 {
@@ -158,23 +207,24 @@ func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) 
 		return
 	}
 	extUpper := strings.ToUpper(pieces[len(pieces)-1])
-	ext := "." + strings.ToLower(pieces[len(pieces)-1])
+	extLowerDot := "." + strings.ToLower(pieces[len(pieces)-1]) // e.g. ".jpg" or ".mp4"
 
-	if utils.InArray(extUpper, movieExtensions) {
+	// Handle videos
+	if utils.InArray(extUpper, movieExts) {
 		fd, err := os.Open(fileWork)
 		if err != nil {
 			stdErr.Println("Could not open movie file " + fileWork + ": " + err.Error())
 			return
 		}
 		timeInfo, err := getVideoCreationTimeMetadata(fd)
-		fd.Close()
+		_ = fd.Close()
 		if err != nil {
 			stdErr.Println("Could not read timestamp on movie file " + fileWork + ": " + err.Error())
 			return
 		}
 		potentialName := timeInfo.Format(fmtDesired)
-		if strings.TrimSuffix(baseName, ext) != potentialName {
-			target, err := renameWithCollision(fileWork, potentialName, ext)
+		if strings.TrimSuffix(baseName, extLowerDot) != potentialName {
+			target, err := renameWithCollision(fileWork, potentialName, extLowerDot)
 			if err != nil {
 				stdErr.Println("Could not resolve collision for: " + fileWork + ": " + err.Error())
 				return
@@ -183,11 +233,12 @@ func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) 
 				stdErr.Println("Could not rename " + fileWork + " to " + target + ": " + err.Error())
 				return
 			}
-			log.Println("Renamed " + baseName + " to " + filepath.Base(target))
+			log.Println("Renamed " + baseName + " => " + filepath.Base(target))
 		}
 		return
 	}
 
+	// Handle images
 	data, err := os.ReadFile(fileWork)
 	if err != nil {
 		stdErr.Println("Could not read file " + fileWork + ": " + err.Error())
@@ -199,13 +250,13 @@ func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) 
 		stdErr.Println("Could not decode EXIF data for " + fileWork + ": " + err.Error())
 		return
 	}
-	data, err = x.MarshalJSON()
+	jsonBytes, err := x.MarshalJSON()
 	if err != nil {
 		stdErr.Println("Could not marshal EXIF JSON for " + fileWork + ": " + err.Error())
 		return
 	}
 	exifFields := make(map[string]interface{})
-	if err := json.Unmarshal(data, &exifFields); err != nil {
+	if err := json.Unmarshal(jsonBytes, &exifFields); err != nil {
 		stdErr.Println("Could not unmarshal EXIF JSON for " + fileWork + ": " + err.Error())
 		return
 	}
@@ -214,24 +265,20 @@ func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) 
 	var parseErr error
 	if val, ok := exifFields["DateTimeOriginal"]; ok {
 		timeInfo, parseErr = time.Parse("2006:01:02 15:04:05", val.(string))
-		if parseErr != nil {
-			stdErr.Println("Failed to parse DateTimeOriginal EXIF data for " + fileWork + ": " + parseErr.Error())
-			return
-		}
 	} else if val, ok := exifFields["DateTime"]; ok {
 		timeInfo, parseErr = time.Parse("2006:01:02 15:04:05", val.(string))
-		if parseErr != nil {
-			stdErr.Println("Failed to parse DateTime EXIF data for " + fileWork + ": " + parseErr.Error())
-			return
-		}
 	} else {
-		stdErr.Println("No suitable date field found for " + fileWork)
+		stdErr.Println("No suitable EXIF date field found for " + fileWork)
+		return
+	}
+	if parseErr != nil {
+		stdErr.Println("Failed to parse EXIF date field for " + fileWork + ": " + parseErr.Error())
 		return
 	}
 
 	potentialName := timeInfo.Format(fmtDesired)
-	if baseName != potentialName+ext {
-		target, err := renameWithCollision(fileWork, potentialName, ext)
+	if baseName != potentialName+extLowerDot {
+		target, err := renameWithCollision(fileWork, potentialName, extLowerDot)
 		if err != nil {
 			stdErr.Println("Could not resolve collision for " + fileWork + ": " + err.Error())
 			return
@@ -240,10 +287,12 @@ func processFile(fileWork string, movieExtensions []string, stdErr *log.Logger) 
 			stdErr.Println("Could not rename " + fileWork + " to " + target + ": " + err.Error())
 			return
 		}
-		log.Println("Renamed " + baseName + " to " + filepath.Base(target))
+		log.Println("Renamed " + baseName + " => " + filepath.Base(target))
 	}
 }
 
+// processDirectory is an optional helper if you prefer to process an entire
+// folder at once, but here we do it file-by-file in main().
 func processDirectory(fileDir string, stdErr *log.Logger) {
 	files, err := recurseFiles(fileDir)
 	if err != nil {
@@ -255,22 +304,24 @@ func processDirectory(fileDir string, stdErr *log.Logger) {
 	}
 }
 
+// countFilesInDirs returns the total number of filtered (photo/video) files in each directory.
 func countFilesInDirs(originalDir, backupDir string) (int, int, error) {
 	originalCount, err1 := countFilteredFiles(originalDir)
-	backupCount, err2 := countFilteredFiles(backupDir)
-
 	if err1 != nil {
 		return 0, 0, err1
 	}
+	backupCount, err2 := countFilteredFiles(backupDir)
 	if err2 != nil {
 		return 0, 0, err2
 	}
-
 	return originalCount, backupCount, nil
 }
 
+// ---------------------------------------------------
+// main()
+// ---------------------------------------------------
+
 func main() {
-	// Validate command-line arguments.
 	if len(os.Args) < 2 {
 		log.Fatal("Usage: program <directory> [date-format]")
 	}
@@ -282,68 +333,54 @@ func main() {
 	startEntireProcess := time.Now()
 	stdErr := log.New(os.Stderr, "", 0)
 
-	// Ensure the directory path ends with the appropriate separator.
-	var directoryToIterate string
-	lastByte := potentialPath[len(potentialPath)-1:]
-	if lastByte != "\\" && path.IsWindows {
-		directoryToIterate = potentialPath + "\\"
-	} else if lastByte != "/" {
-		directoryToIterate = potentialPath + "/"
-	} else {
-		directoryToIterate = potentialPath
-	}
-
-	if path.IsWindows && strings.Contains(directoryToIterate, "\\\\") {
-		log.Fatal("Please only escape your directory path once with \\")
-	}
-
-	if !extensions.DoesFileExist(directoryToIterate) {
-		log.Fatal("Path does not exist or is invalid")
-	}
-	backupDirPath, err := backupDirectory(directoryToIterate)
+	// 1) Convert the user’s path to absolute to avoid trailing slash edge cases
+	originalAbsPath, err := filepath.Abs(potentialPath)
 	if err != nil {
-		log.Fatalf("Backup failed: %v", err) // Logs the error and exits
+		log.Fatal("Failed to get absolute path: ", err)
+	}
+
+	if !extensions.DoesFileExist(originalAbsPath) {
+		log.Fatal("Path does not exist or is invalid: ", originalAbsPath)
+	}
+
+	// 2) Create a backup as a sibling of the original directory
+	backupDirPath, err := backupDirectory(originalAbsPath)
+	if err != nil {
+		log.Fatalf("Backup failed: %v", err)
 	}
 	log.Println("Backup created at:", backupDirPath)
 
-	// Get all files in the directory tree.
-	files, err := recurseFiles(directoryToIterate)
+	// 3) Recursively find and rename all matching files
+	files, err := recurseFiles(originalAbsPath)
 	if err != nil {
 		log.Fatal("Error recursing files: ", err)
 	}
-
-	// Process each file synchronously.
 	for _, fileToWorkOn := range files {
-		// Only process files with a known extension.
-		extParts := strings.Split(fileToWorkOn, ".")
-		if len(extParts) < 2 {
-			continue
-		}
-
-		ext := strings.ToUpper(extParts[len(extParts)-1])
-		if utils.InArray(ext, pictureExtensions) || utils.InArray(ext, movieExtensions) {
+		ext := strings.ToUpper(filepath.Ext(fileToWorkOn))
+		ext = strings.TrimPrefix(ext, ".") // remove leading "."
+		if inArray(ext, pictureExtensions) || inArray(ext, movieExtensions) {
 			baseName := filepath.Base(fileToWorkOn)
-			pieces := strings.Split(baseName, ".")
-			// Skip files that already match the desired format.
-			if _, err := time.Parse(fmtDesired, strings.TrimSuffix(baseName, "."+pieces[len(pieces)-1])); err == nil {
-				log.Println(baseName + " is in desired date format, skipping.")
+			// If the base name (minus .ext) already *parses* into the fmtDesired, skip
+			nameNoExt := strings.TrimSuffix(baseName, "."+strings.ToLower(ext))
+			if _, parseErr := time.Parse(fmtDesired, nameNoExt); parseErr == nil {
+				log.Println(baseName + " is already in desired date format, skipping.")
 				continue
 			}
+			// Otherwise, process (may rename).
 			processFile(fileToWorkOn, movieExtensions, stdErr)
 		}
 	}
 
-	// // Perform the cleanup of backup files.
-	// cleanupBackups(backupDirPath)wsl -l -v
-
-	originalCount, backupCount, err := countFilesInDirs(directoryToIterate, backupDirPath)
-	if err == nil && originalCount == backupCount {
-		os.RemoveAll(backupDirPath)
-		log.Printf("Backup removed: %s", backupDirPath)
-	} else if err != nil {
+	// 4) Compare total counts in original vs backup; remove backup if counts match.
+	originalCount, backupCount, err := countFilesInDirs(originalAbsPath, backupDirPath)
+	if err != nil {
 		log.Printf("Error counting files: %v", err)
+	} else if originalCount == backupCount {
+		_ = os.RemoveAll(backupDirPath)
+		log.Printf("Backup removed: %s (counts matched: %d)", backupDirPath, originalCount)
 	} else {
-		log.Printf("Backup retained due to mismatch: %s (Original: %d, Backup: %d)", backupDirPath, originalCount, backupCount)
+		log.Printf("Backup retained due to mismatch: %s (Original: %d, Backup: %d)",
+			backupDirPath, originalCount, backupCount)
 	}
 
 	log.Println(logger.TimeTrack(startEntireProcess, "Completed in"))
